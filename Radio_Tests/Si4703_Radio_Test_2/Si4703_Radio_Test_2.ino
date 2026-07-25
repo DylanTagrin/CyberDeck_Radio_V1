@@ -4,11 +4,11 @@
 int resetPin = 25;
 int SDIO = 21;
 int SCLK = 22;
-int STC = 3;
+int STC = 26;
 
 Si4703_Breakout radio(resetPin, SDIO, SCLK, STC);
 
-int channel = 889; // default: 88.9 MHz, change this
+int channel = 1005; // default: 100.5 MHz
 int volume = 5;
 char rdsBuffer[10];
 
@@ -21,7 +21,7 @@ void setup()
   Serial.println("=======================");
   Serial.println("Commands:");
   Serial.println("  T889   tune to 88.9 MHz");
-  Serial.println("  T1011  tune to 101.1 MHz");
+  Serial.println("  T1005  tune to 100.5 MHz");
   Serial.println("  u      seek up");
   Serial.println("  d      seek down");
   Serial.println("  +      volume up");
