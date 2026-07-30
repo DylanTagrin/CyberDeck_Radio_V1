@@ -8,7 +8,7 @@ int STC = 26;
 
 Si4703_Breakout radio(resetPin, SDIO, SCLK, STC);
 
-int channel = 1005; // default: 100.5 MHz
+int channel = 1037; // default: 100.5 MHz
 int volume = 5;
 char rdsBuffer[10];
 
@@ -20,7 +20,7 @@ void setup()
   Serial.println("\n\nSi4703 ESP32 Radio Test");
   Serial.println("=======================");
   Serial.println("Commands:");
-  Serial.println("  T889   tune to 88.9 MHz");
+  Serial.println("  T937   tune to 937 MHz");
   Serial.println("  T1005  tune to 100.5 MHz");
   Serial.println("  u      seek up");
   Serial.println("  d      seek down");

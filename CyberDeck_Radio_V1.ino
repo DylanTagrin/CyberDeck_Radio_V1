@@ -5,50 +5,128 @@
 
 
 
-// ---------- ESP32 / I2C pins ----------
-constexpr int SDA_PIN = 21;
-constexpr int SCL_PIN = 22;
-
-
 // ---------- I2C addresses ----------
 constexpr uint8_t OLED_ADDRESS = 0x3C;
 constexpr uint8_t SI4703_ADDRESS = 0x10;
 
+// ----------- Radio ---------
+int resetPin = 25;
+int SDIO = 21;
+int SCLK = 22;
+int STC = 26;
+Si4703_Breakout radio(resetPin, SDIO, SCLK, STC);
 
-// ----------- Radio Pins --------
-const int RADIO_SDIO_PIN  = 21;
-const int RADIO_SCLK_PIN  = 22;
-const int RADIO_RESET_PIN = 25;
-// Do NOT wire anything to ESP32 GPIO3 just because of this.
-const int STC_PIN = 3;
+int channel = 1037;  // default: 100.5 MHz
+int volume = 5;
+char rdsBuffer[10];
 
 // ---------------- OLED ----------------
 const int SCREEN_WIDTH = 128;
 const int SCREEN_HEIGHT = 64;
 const int OLED_RESET = -1;
-const uint8_t OLED_ADDR = 0x3C;
+// OLED second I2C bus
+TwoWire OLEDWire = TwoWire(1);
+const int OLED_SDA = 16;
+const int OLED_SCL = 17;
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &OLEDWire, OLED_RESET);
 
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
-
-// ---------------- Radio ----------------
-Si4703_Breakout radio(RADIO_RESET_PIN, RADIO_SDIO_PIN, RADIO_SCLK_PIN, STC_PIN);
-
-int channel = 1027;   // 102.7 MHz default.
-int volume = 6;      // 0-15
-char rdsBuffer[10];
-
+// ----- Initial Vars -----
 String modeText = "Boot";
 bool oledOK = false;
 bool radioStarted = false;
 
-unsigned long lastDisplayUpdate = 0;
-const unsigned long DISPLAY_INTERVAL_MS = 5000;
-
-// Serial command buffer
-String inputLine = "";
 
 
-// ---------------- Utility ----------------
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+  Serial.println();
+
+  // Default Wire bus for radio
+  Wire.begin(SDIO, SCLK);
+  Wire.setClock(100000);
+
+  // Separate OLED bus
+  OLEDWire.begin(OLED_SDA, OLED_SCL);
+  OLEDWire.setClock(100000);
+  scanOLEDBus();
+  oledOK = display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDRESS);
+  if (oledOK) {
+    modeText = "OLED OK";
+    drawOLED();
+    Serial.println("OLED succeeded to initialize.");
+  } else {
+    Serial.println("OLED failed to initialize.");
+  }
+
+
+
+
+  Serial.println("\n\nSi4703 ESP32 Radio Test");
+  Serial.println("=======================");
+  Serial.println("Commands:");
+  Serial.println("  T937   tune to 937 MHz");
+  Serial.println("  T1005  tune to 100.5 MHz");
+  Serial.println("  u      seek up");
+  Serial.println("  d      seek down");
+  Serial.println("  +      volume up");
+  Serial.println("  -      volume down");
+  Serial.println("  r      read RDS");
+
+  radio.powerOn();
+
+  volume = 5;
+  radio.setVolume(volume);
+
+  radio.setChannel(channel);
+  displayInfo();
+}
+
+void loop() {
+  if (Serial.available()) {
+    char ch = Serial.read();
+
+    if (ch == 'T' || ch == 't') {
+      // Parse the number after T, e.g. T955 = 95.5 MHz
+      int requestedChannel = Serial.parseInt();
+
+      if (requestedChannel >= 875 && requestedChannel <= 1080) {
+        channel = requestedChannel;
+        radio.setChannel(channel);
+        displayInfo();
+        drawOLED();
+      } else {
+        Serial.println("Invalid channel. Use 875 to 1080, e.g. T955 for 95.5 MHz.");
+      }
+    } else if (ch == 'u') {
+      channel = radio.seekUp();
+      displayInfo();
+    } else if (ch == 'd') {
+      channel = radio.seekDown();
+      displayInfo();
+    } else if (ch == '+') {
+      volume++;
+      if (volume > 15) volume = 15;
+      radio.setVolume(volume);
+      displayInfo();
+      drawOLED();
+    } else if (ch == '-') {
+      volume--;
+      if (volume < 0) volume = 0;
+      radio.setVolume(volume);
+      displayInfo();
+      drawOLED();
+    } else if (ch == 'r') {
+      Serial.println("RDS listening...");
+      radio.readRDS(rdsBuffer, 15000);
+      Serial.print("RDS heard: ");
+      Serial.println(rdsBuffer);
+    }
+  }
+}
+
+
+// --------- Functions -------
 
 void drawOLED() {
   if (!oledOK) return;
@@ -97,245 +175,36 @@ void drawOLED() {
 }
 
 
-// ---------- Serial/debug ----------
+void scanOLEDBus() {
+  Serial.println("Scanning OLEDWire bus...");
 
-void printInfo() {
+  int found = 0;
+
+  for (uint8_t addr = 1; addr < 127; addr++) {
+    OLEDWire.beginTransmission(addr);
+    uint8_t error = OLEDWire.endTransmission();
+
+    if (error == 0) {
+      Serial.print("Found device at 0x");
+      if (addr < 16) Serial.print("0");
+      Serial.println(addr, HEX);
+      found++;
+    }
+  }
+
+  if (found == 0) {
+    Serial.println("No devices found on OLEDWire.");
+  }
+}
+
+void displayInfo() {
   Serial.print("Channel: ");
   Serial.print(channel / 10.0, 1);
   Serial.print(" MHz");
 
-  Serial.print(" | Raw: ");
+  Serial.print(" | Raw channel: ");
   Serial.print(channel);
 
   Serial.print(" | Volume: ");
-  Serial.print(volume);
-
-  Serial.print(" | Mode: ");
-  Serial.println(modeText);
-}
-
-
-void showHelp() {
-  Serial.println();
-  Serial.println("Commands:");
-  Serial.println("  T1027  tune to 102.7 MHz");
-  Serial.println("  T955   tune to 95.5 MHz");
-  Serial.println("  u      seek up");
-  Serial.println("  d      seek down");
-  Serial.println("  +      volume up");
-  Serial.println("  -      volume down");
-  Serial.println("  r      read RDS");
-  Serial.println("  h      help");
-  Serial.println();
-}
-
-
-
-// ---------- Radio control ----------
-
-void tuneToChannel(int newChannel) {
-
-  if (newChannel < 875 || newChannel > 1080) {
-    Serial.println("Invalid channel. Use 875 to 1080, e.g. T1027 for 102.7 MHz.");
-    modeText = "Bad input";
-    drawOLED();
-    return;
-  }
-
-  channel = newChannel;
-  radio.setChannel(channel);
-  modeText = "Direct";
-
-  printInfo();
-  drawOLED();
-}
-
-
-void setRadioVolume(int newVolume) {
-  if (newVolume < 0) newVolume = 0;
-  if (newVolume > 15) newVolume = 15;
-
-  volume = newVolume;
-  radio.setVolume(volume);
-  modeText = "Volume";
-
-  printInfo();
-  drawOLED();
-}
-
-
-
-void seekUp() {
-  modeText = "Seek up";
-  drawOLED();
-
-  channel = radio.seekUp();
-
-  modeText = "Seek up";
-  printInfo();
-  drawOLED();
-}
-
-
-void seekDown() {
-  modeText = "Seek down";
-  drawOLED();
-
-  channel = radio.seekDown();
-
-  modeText = "Seek down";
-  printInfo();
-  drawOLED();
-}
-
-
-void readRDS() {
-  Serial.println("RDS listening for up to 15 seconds...");
-  modeText = "RDS wait";
-  drawOLED();
-
-  radio.readRDS(rdsBuffer, 15000);
-
-  Serial.print("RDS heard: ");
-  Serial.println(rdsBuffer);
-
-  modeText = "RDS done";
-  drawOLED();
-}
-
-
-// ---------- Command parsing ----------
-
-void processCommand(String cmd) {
-  cmd.trim();
-
-  if (cmd.length() == 0) {
-    return;
-  }
-
-  Serial.print("Command received: ");
-  Serial.println(cmd);
-
-  char command = cmd.charAt(0);
-
-  if (command == 'T' || command == 't') {
-    String numberPart = cmd.substring(1);
-    numberPart.trim();
-
-    int requestedChannel = numberPart.toInt();
-
-    if (requestedChannel == 0) {
-      Serial.println("Bad tune command. Example: T1027 for 102.7 MHz.");
-      modeText = "Bad cmd";
-      drawOLED();
-      return;
-    }
-
-    tuneToChannel(requestedChannel);
-  }
-
-  else if (command == 'u') {
-    seekUp();
-  }
-
-  else if (command == 'd') {
-    seekDown();
-  }
-
-  else if (command == '+') {
-    setRadioVolume(volume + 1);
-  }
-
-  else if (command == '-') {
-    setRadioVolume(volume - 1);
-  }
-
-  else if (command == 'r') {
-    readRDS();
-  }
-
-  else if (command == 'h') {
-    showHelp();
-    modeText = "Help";
-    drawOLED();
-  }
-
-  else {
-    Serial.println("Unknown command. Type h for help.");
-    modeText = "Unknown";
-    drawOLED();
-  }
-}
-
-
-void readSerialCommands() {
-  while (Serial.available()) {
-    char c = Serial.read();
-
-    if (c == '\r') {
-      // Ignore carriage return.
-      continue;
-    }
-
-    if (c == '\n') {
-      processCommand(inputLine);
-      inputLine = "";
-    } else {
-      inputLine += c;
-    }
-  }
-}
-
-
-
-// ---------------- Arduino setup/loop ----------------
-// ---------- Arduino setup/loop ----------
-
-void setup() {
-  Serial.begin(115200);
-  delay(1000);
-
-  Serial.println();
-  Serial.println("ESP32 + Si4703 + OLED Radio Test");
-  Serial.println("================================");
-
-  Wire.begin(SDA_PIN, SCL_PIN);
-  Wire.setClock(100000);
-
-  oledOK = display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR);
-
-  if (oledOK) {
-    modeText = "OLED OK";
-    drawOLED();
-  } else {
-    Serial.println("OLED failed to initialize.");
-  }
-
-  Serial.println("Powering on radio...");
-  modeText = "Radio boot";
-  drawOLED();
-
-  radio.powerOn();
-
-  volume = 6;
-  radio.setVolume(volume);
-
-  radio.setChannel(channel);
-  modeText = "Direct";
-
-  showHelp();
-  printInfo();
-  drawOLED();
-}
-
-
-void loop() {
-  readSerialCommands();
-
-  // Slow runtime refresh only.
-  // This reduces digital ticking compared to updating the OLED every 250 ms.
-  if (millis() - lastDisplayUpdate >= DISPLAY_INTERVAL_MS) {
-    lastDisplayUpdate = millis();
-    drawOLED();
-  }
+  Serial.println(volume);
 }
