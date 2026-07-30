@@ -36,11 +36,38 @@ bool oledOK = false;
 bool radioStarted = false;
 
 
+// ---------------- Controls ----------------
+const int ENC_A = 32;
+const int ENC_B = 33;
+const int ENC_SW = 27;
+
+const int VOL_POT = 34;  // input-only ADC pin, good for potentiometer
+
+// ---------------- Encoder state ----------------
+int lastEncA = HIGH;
+unsigned long lastEncoderMoveMs = 0;
+const unsigned long encoderDebounceMs = 3;
+
+// ---------------- Button debounce ----------------
+int lastButtonState = HIGH;
+unsigned long lastButtonPressMs = 0;
+const unsigned long buttonDebounceMs = 250;
+
+// ---------------- Potentiometer smoothing ----------------
+int lastVolumeFromPot = -1;
+unsigned long lastPotReadMs = 0;
+const unsigned long potReadIntervalMs = 80;
+
+
+
 
 void setup() {
   Serial.begin(115200);
   delay(1000);
+
   Serial.println();
+  Serial.println("ESP32 Si4703 Radio Interface");
+  Serial.println("============================");
 
   // Default Wire bus for radio
   Wire.begin(SDIO, SCLK);
@@ -59,7 +86,16 @@ void setup() {
     Serial.println("OLED failed to initialize.");
   }
 
+  // Controls
+  pinMode(ENC_A, INPUT_PULLUP);
+  pinMode(ENC_B, INPUT_PULLUP);
+  pinMode(ENC_SW, INPUT_PULLUP);
 
+  // ADC setup for ESP32
+  analogReadResolution(12);  // 0-4095
+  analogSetPinAttenuation(VOL_POT, ADC_11db);
+
+  lastEncA = digitalRead(ENC_A);
 
 
   Serial.println("\n\nSi4703 ESP32 Radio Test");
@@ -77,53 +113,226 @@ void setup() {
 
   volume = 5;
   radio.setVolume(volume);
+  radio.setChannel(channel);
+
+  showHelp();
+  displayInfo();
+}
+
+void loop()
+{
+  handleSerial();
+  handleEncoder();
+  handleEncoderButton();
+  handleVolumePot();
+  displayInfo();
+}
+
+// ---------------- Serial controls ----------------
+
+void handleSerial()
+{
+  if (Serial.available())
+  {
+    char ch = Serial.read();
+
+    if (ch == 'T' || ch == 't')
+    {
+      int requestedChannel = Serial.parseInt();
+
+      if (requestedChannel >= 875 && requestedChannel <= 1080)
+      {
+        setChannelDirect(requestedChannel, "Serial");
+      }
+      else
+      {
+        Serial.println("Invalid channel. Use 875 to 1080, e.g. T955 for 95.5 MHz.");
+        modeText = "Bad input";
+        drawOLED();
+      }
+    }
+    else if (ch == 'u')
+    {
+      seekUp();
+    }
+    else if (ch == 'd')
+    {
+      seekDown();
+    }
+    else if (ch == '+')
+    {
+      setVolumeDirect(volume + 1, "Serial Vol+");
+    }
+    else if (ch == '-')
+    {
+      setVolumeDirect(volume - 1, "Serial Vol-");
+    }
+    else if (ch == 'r')
+    {
+      readRDS();
+    }
+    else if (ch == 'h')
+    {
+      showHelp();
+    }
+  }
+}
+
+
+// ---------------- Encoder frequency control ----------------
+
+void handleEncoder()
+{
+  int encA = digitalRead(ENC_A);
+
+  // Detect a falling edge on A.
+  if (lastEncA == HIGH && encA == LOW)
+  {
+    if (millis() - lastEncoderMoveMs >= encoderDebounceMs)
+    {
+      lastEncoderMoveMs = millis();
+
+      int encB = digitalRead(ENC_B);
+
+      if (encB == HIGH)
+      {
+        // One direction
+        setChannelDirect(channel + 1, "Tune +");
+      }
+      else
+      {
+        // Other direction
+        setChannelDirect(channel - 1, "Tune -");
+      }
+    }
+  }
+
+  lastEncA = encA;
+}
+
+
+// ---------------- Encoder pushbutton ----------------
+
+void handleEncoderButton()
+{
+  int buttonState = digitalRead(ENC_SW);
+
+  if (lastButtonState == HIGH && buttonState == LOW)
+  {
+    if (millis() - lastButtonPressMs >= buttonDebounceMs)
+    {
+      lastButtonPressMs = millis();
+
+      // Button action: seek up
+      seekUp();
+    }
+  }
+
+  lastButtonState = buttonState;
+}
+
+
+// ---------------- Potentiometer volume control ----------------
+
+void handleVolumePot()
+{
+  if (millis() - lastPotReadMs < potReadIntervalMs)
+  {
+    return;
+  }
+
+  lastPotReadMs = millis();
+
+  int raw = analogRead(VOL_POT);  // 0-4095
+
+  // Convert 0-4095 to volume 0-15.
+  int newVolume = map(raw, 0, 4095, 0, 15);
+
+  if (newVolume < 0) newVolume = 0;
+  if (newVolume > 15) newVolume = 15;
+
+  // Only update if the value actually changed.
+  // This prevents tiny ADC jitter from constantly sending volume commands.
+  if (newVolume != lastVolumeFromPot)
+  {
+    lastVolumeFromPot = newVolume;
+
+    if (newVolume != volume)
+    {
+      setVolumeDirect(newVolume, "Pot Vol");
+    }
+  }
+}
+
+
+// --------- Radio Command Functions -----------
+
+void setChannelDirect(int newChannel, String newMode)
+{
+  if (newChannel > 1080) newChannel = 875;
+  if (newChannel < 875) newChannel = 1080;
+
+  channel = newChannel;
+  modeText = newMode;
 
   radio.setChannel(channel);
   displayInfo();
 }
 
-void loop() {
-  if (Serial.available()) {
-    char ch = Serial.read();
 
-    if (ch == 'T' || ch == 't') {
-      // Parse the number after T, e.g. T955 = 95.5 MHz
-      int requestedChannel = Serial.parseInt();
+void setVolumeDirect(int newVolume, String newMode)
+{
+  if (newVolume < 0) newVolume = 0;
+  if (newVolume > 15) newVolume = 15;
 
-      if (requestedChannel >= 875 && requestedChannel <= 1080) {
-        channel = requestedChannel;
-        radio.setChannel(channel);
-        displayInfo();
-        drawOLED();
-      } else {
-        Serial.println("Invalid channel. Use 875 to 1080, e.g. T955 for 95.5 MHz.");
-      }
-    } else if (ch == 'u') {
-      channel = radio.seekUp();
-      displayInfo();
-    } else if (ch == 'd') {
-      channel = radio.seekDown();
-      displayInfo();
-    } else if (ch == '+') {
-      volume++;
-      if (volume > 15) volume = 15;
-      radio.setVolume(volume);
-      displayInfo();
-      drawOLED();
-    } else if (ch == '-') {
-      volume--;
-      if (volume < 0) volume = 0;
-      radio.setVolume(volume);
-      displayInfo();
-      drawOLED();
-    } else if (ch == 'r') {
-      Serial.println("RDS listening...");
-      radio.readRDS(rdsBuffer, 15000);
-      Serial.print("RDS heard: ");
-      Serial.println(rdsBuffer);
-    }
-  }
+  volume = newVolume;
+  modeText = newMode;
+
+  radio.setVolume(volume);
+  displayInfo();
 }
+
+
+void seekUp()
+{
+  modeText = "Seek up";
+  drawOLED();
+
+  channel = radio.seekUp();
+
+  modeText = "Seek up";
+  displayInfo();
+}
+
+
+void seekDown()
+{
+  modeText = "Seek down";
+  drawOLED();
+
+  channel = radio.seekDown();
+
+  modeText = "Seek down";
+  displayInfo();
+}
+
+
+void readRDS()
+{
+  Serial.println("RDS listening...");
+  modeText = "RDS wait";
+  drawOLED();
+
+  radio.readRDS(rdsBuffer, 15000);
+
+  Serial.print("RDS heard: ");
+  Serial.println(rdsBuffer);
+
+  modeText = "RDS done";
+  drawOLED();
+}
+
+
 
 
 // --------- Functions -------
@@ -207,4 +416,19 @@ void displayInfo() {
 
   Serial.print(" | Volume: ");
   Serial.println(volume);
+}
+
+
+void showHelp() {
+  Serial.println();
+  Serial.println("Commands:");
+  Serial.println("  T1037  tune to 103.7 MHz");
+  Serial.println("  T1005  tune to 100.5 MHz");
+  Serial.println("  u      seek up");
+  Serial.println("  d      seek down");
+  Serial.println("  +      volume up");
+  Serial.println("  -      volume down");
+  Serial.println("  r      read RDS");
+  Serial.println("  h      help");
+  Serial.println();
 }
